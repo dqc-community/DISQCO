@@ -243,12 +243,14 @@ def layer_list_to_dict(layers):
                     gate_dict['type'] = 'single-qubit'
                 elif len(qargs) == 2:
                     gate_dict['type'] = 'two-qubit'
+                else:
+                    gate_dict['type'] = 'multi-qubit'
                 gate_dict['name'] = name
                 gate_dict['qargs'] = qargs
                 gate_dict['qregs'] = qregs
                 gate_dict['params'] = params
                 # If classically controlled, annotate it (store both register compare and single bit when available)
-                if gate_dict['type'] == 'single-qubit' and meta:
+                if gate_dict.get('type') == 'single-qubit' and meta:
                     if 'cond_register' in meta and 'cond_val' in meta:
                         gate_dict['classical_control_register'] = meta['cond_register']
                         gate_dict['classical_control_val'] = meta['cond_val']
@@ -257,5 +259,4 @@ def layer_list_to_dict(layers):
                         gate_dict['cbit'] = meta['cond_bit']
             d[i].append(gate_dict)
     return d
-
 

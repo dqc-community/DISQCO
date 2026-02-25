@@ -127,7 +127,7 @@ def test_compare_epr_counts_initial_vs_optimized(test_hypergraph, test_network,
         partition_assignment=initial_assignment
     )
     circuit_initial = extractor_initial.extract_partitioned_circuit()
-    circuit_initial_epr = transpile(circuit_initial, basis_gates=['u', 'cp', 'EPR'])
+    circuit_initial_epr = circuit_initial
     
     # Extract with optimized assignment
     extractor_optimized = PartitionedCircuitExtractor(
@@ -136,7 +136,7 @@ def test_compare_epr_counts_initial_vs_optimized(test_hypergraph, test_network,
         partition_assignment=optimized_assignment
     )
     circuit_optimized = extractor_optimized.extract_partitioned_circuit()
-    circuit_optimized_epr = transpile(circuit_optimized, basis_gates=['u', 'cp', 'EPR'])
+    circuit_optimized_epr = circuit_optimized
     
     # Count EPR pairs
     ops_initial = circuit_initial_epr.count_ops()
@@ -287,8 +287,8 @@ def test_full_workflow_initial_to_optimized():
     assert circuit_optimized.num_qubits > 0
     
     # Count EPR pairs
-    circuit_initial_epr = transpile(circuit_initial, basis_gates=['u', 'cp', 'EPR'])
-    circuit_optimized_epr = transpile(circuit_optimized, basis_gates=['u', 'cp', 'EPR'])
+    circuit_initial_epr = circuit_initial
+    circuit_optimized_epr = circuit_optimized
     
     epr_initial = circuit_initial_epr.count_ops().get('EPR', 0)
     epr_optimized = circuit_optimized_epr.count_ops().get('EPR', 0)
@@ -347,7 +347,7 @@ def test_extractor_with_single_partition():
     )
     
     partitioned_circuit = extractor.extract_partitioned_circuit()
-    circuit_epr = transpile(partitioned_circuit, basis_gates=['u', 'cp', 'EPR'])
+    circuit_epr = partitioned_circuit
     
     epr_count = circuit_epr.count_ops().get('EPR', 0)
     
