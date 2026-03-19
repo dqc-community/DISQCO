@@ -52,7 +52,7 @@ def run_sampler(circuit, shots=4096):
     sampler = SamplerV2()
     num_qubits = circuit.num_qubits
     dec_circuit = circuit.copy()
-    dec_circuit = transpile(dec_circuit, basis_gates=['u', 'cp', 'EPR'])
+    dec_circuit = transpile(dec_circuit, optimization_level=0)
     dec_circuit = dec_circuit.decompose()
     if num_qubits <= 13:
 

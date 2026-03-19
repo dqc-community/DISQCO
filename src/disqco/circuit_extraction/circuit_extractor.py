@@ -49,7 +49,10 @@ class TeleportationManager:
         circ.h(0)
         circ.measure(0, 0)
         circ.reset(0)
-        circ.z(1).c_if(0, 1)
+        circ.z(1)
+        op = circ.data[-1].operation.to_mutable()
+        op.condition = (circ.clbits[0], 1)
+        circ.data[-1] = circ.data[-1].replace(operation=op)
         return circ.to_instruction()
 
     def build_epr_circuit(self) -> Instruction:
@@ -75,7 +78,10 @@ class TeleportationManager:
         circ.cx(0, 1)
         circ.measure(1, 0)
         circ.reset(1)
-        circ.x(2).c_if(0, 1)
+        circ.x(2)
+        op = circ.data[-1].operation.to_mutable()
+        op.condition = (circ.clbits[0], 1)
+        circ.data[-1] = circ.data[-1].replace(operation=op)
 
         instr = circ.to_instruction()
         instr.name = "Starting Process"
@@ -91,7 +97,10 @@ class TeleportationManager:
         circ.h(1)
         circ.measure(1, 0)
         circ.reset(1)
-        circ.z(0).c_if(0, 1)
+        circ.z(0)
+        op = circ.data[-1].operation.to_mutable()
+        op.condition = (circ.clbits[0], 1)
+        circ.data[-1] = circ.data[-1].replace(operation=op)
 
         instr = circ.to_instruction()
         instr.name = "Ending Process"
@@ -463,7 +472,10 @@ class TeleportationManager:
 
         for comm_child, cbits, last_cbit in correction_info:
             for cb in cbits:
-                self.qc.x(comm_child).c_if(cb, 1)
+                self.qc.x(comm_child)
+                op = self.qc.data[-1].operation.to_mutable()
+                op.condition = (cb, 1)
+                self.qc.data[-1] = self.qc.data[-1].replace(operation=op)
             # Release classical bits after use
             self.creg_manager.release_cbit(last_cbit)
         all_nodes = set(tree.nodes())
@@ -983,9 +995,6 @@ class PartitionedCircuitExtractor:
             self.qc.measure(self.qubit_manager.log_to_phys_idx[i], self.result_reg[i])
         
         self.qc = reorder_registers_by_index(self.qc)
-        teleportation_gates = ['x', 'z']
-        basis_gate_set = set(teleportation_gates).union(set(self.basis_gates)).union(set(['EPR']))
-        self.qc = transpile(self.qc, basis_gates= list(basis_gate_set))
         return self.qc
     
 def reorder_registers_by_index(circuit):
@@ -1025,5 +1034,3 @@ def reorder_registers_by_index(circuit):
     for instruction in circuit.data:
         new_circ.append(instruction.operation, instruction.qubits, instruction.clbits)
     return new_circ
-
-
