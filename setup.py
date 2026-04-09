@@ -1,9 +1,15 @@
 # setup.py
-from setuptools import setup, find_packages
+from pathlib import Path
+
+from setuptools import find_packages, setup
+
+README = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
 
 setup(
-    name="disqco",
-    version="0.0.5",
+    name="bosonic-disqco",
+    version="0.0.6",
+    long_description=README,
+    long_description_content_type="text/markdown",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     install_requires=["numpy>=1.26,<2.3.4",
