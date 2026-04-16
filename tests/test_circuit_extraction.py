@@ -7,12 +7,11 @@ circuits from hypergraphs with both initial (unoptimized) and optimized assignme
 
 import pathlib
 import random as _random_module
-import sys
 from contextlib import contextmanager
 
 import pytest
 import numpy as np
-from qiskit import QuantumCircuit, transpile
+from qiskit import QuantumCircuit, qasm2, transpile
 
 from disqco import QuantumNetwork, QuantumCircuitHyperGraph, PartitionedCircuitExtractor
 from disqco.circuits.cp_fraction import cp_fraction
@@ -22,11 +21,7 @@ from disqco.graphs.coarsening.coarsener import HypergraphCoarsener
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-DQCOMP_ROOT = REPO_ROOT / "dqcomp"
 QASMBENCH_ROOT = REPO_ROOT / "QASMBench"
-
-if str(DQCOMP_ROOT) not in sys.path:
-    sys.path.insert(0, str(DQCOMP_ROOT))
 
 
 @contextmanager
@@ -37,6 +32,25 @@ def _fixed_random_seed(seed: int = 42):
         yield
     finally:
         _random_module.seed = original_seed
+
+
+def _normalize_qasm_for_disqco(qasm_text: str) -> QuantumCircuit:
+    loaded = qasm2.loads(qasm_text)
+    stripped = QuantumCircuit(loaded.num_qubits)
+    for ci in loaded.data:
+        name = ci.operation.name.lower()
+        if name in {"measure", "reset", "barrier", "if_else", "delay"}:
+            continue
+        if ci.clbits:
+            continue
+        remapped_qubits = [stripped.qubits[loaded.find_bit(q).index] for q in ci.qubits]
+        stripped.append(ci.operation, remapped_qubits, [])
+
+    return transpile(
+        stripped,
+        basis_gates=["u", "cp", "cx"],
+        optimization_level=1,
+    )
 
 
 @pytest.fixture
@@ -383,16 +397,10 @@ def test_extractor_with_single_partition():
 
 def test_multilevel_variational_n4_extraction_regression():
     """Regression: multilevel FM variational_n4 should extract without locality failure."""
-    from bosonic_model.qasm import Translator
-    from bosonic_converters import CircuitConverters
-    from bosonic_sdk.distributor.distributors.disqco_distributor import DisqcoDistributor
-
     qasm_path = QASMBENCH_ROOT / "small" / "variational_n4" / "variational_n4.qasm"
     qasm_text = qasm_path.read_text()
 
-    circuit = DisqcoDistributor._normalize_for_disqco(
-        CircuitConverters.to_qiskit(Translator().from_qasm(qasm_text))
-    )
+    circuit = _normalize_qasm_for_disqco(qasm_text)
 
     hypergraph = QuantumCircuitHyperGraph(circuit)
     network = QuantumNetwork.create([3, 3], "all_to_all")
