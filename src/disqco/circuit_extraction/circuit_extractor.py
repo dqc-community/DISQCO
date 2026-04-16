@@ -1,4 +1,5 @@
 import copy
+import os
 import numpy as np
 import networkx as nx
 from qiskit import QuantumRegister, ClassicalRegister, QuantumCircuit, transpile
@@ -7,6 +8,15 @@ from disqco import QuantumCircuitHyperGraph
 from disqco import QuantumNetwork
 from disqco.circuit_extraction.DQC_qubit_manager import DataQubitManager, CommunicationQubitManager, ClassicalBitManager
 import math as mt
+
+
+def _debug_extraction_enabled() -> bool:
+    return os.getenv("DISQCO_DEBUG_EXTRACTION", "").lower() not in {"", "0", "false", "no"}
+
+
+def _debug_extraction(*parts: object) -> None:
+    if _debug_extraction_enabled():
+        print("[disqco-extract]", *parts)
 
 # -------------------------------------------------------------------
 # TeleportationManager
@@ -198,6 +208,13 @@ class TeleportationManager:
         p_root_init = group_info['init_p_root']
         final_p_root = group_info['final_p_root']
         linked_qubits = group_info['linked_qubits']
+        _debug_extraction(
+            "close_group:start",
+            "root=", root_idx,
+            "init=", p_root_init,
+            "final=", final_p_root,
+            "linked=", {p: str(q) for p, q in linked_qubits.items()},
+        )
 
 
         for p, linked_comm in linked_qubits.items():
@@ -222,6 +239,11 @@ class TeleportationManager:
                 self.end_entanglement_link(root_idx, p_root_init, p, final_p_root)
                 self.comm_manager.release_comm_qubit(p, linked_comm)
 
+        _debug_extraction(
+            "close_group:end",
+            "root=", root_idx,
+            "phys=", str(self.qubit_manager.log_to_phys_idx.get(root_idx)),
+        )
         del self.qubit_manager.groups[root_idx]
         
     
@@ -406,6 +428,14 @@ class TeleportationManager:
                                                     target_partitions=target_partitions)
         # Convert to directed graph rooted at p_root
         if undirected_tree:
+            _debug_extraction(
+                "entangle_root_on_tree:start",
+                "root=", root_q,
+                "p_root=", p_root,
+                "targets=", target_partitions,
+                "group_gate=", group_gate,
+                "root_phys=", str(self.qubit_manager.log_to_phys_idx[root_q]),
+            )
             directed_tree = nx.DiGraph()
             # BFS traversal from root
             from collections import deque
@@ -420,11 +450,21 @@ class TeleportationManager:
                         queue.append(child)
             # Now build the entanglement circuit using the directed tree
             node_in_comm = self.build_k_fold_starting_process(root_q, p_root, target_partitions, directed_tree)
+            _debug_extraction(
+                "entangle_root_on_tree:node_in_comm",
+                "root=", root_q,
+                {p: str(q) for p, q in node_in_comm.items()},
+            )
 
             if group_gate:
                 for p in node_in_comm:
                     comm_qubit = node_in_comm[p]
                     self.qubit_manager.groups[root_q]['linked_qubits'][p] = comm_qubit
+                _debug_extraction(
+                    "entangle_root_on_tree:linked_qubits",
+                    "root=", root_q,
+                    {p: str(q) for p, q in self.qubit_manager.groups[root_q]['linked_qubits'].items()},
+                )
             return node_in_comm
 
     def build_k_fold_starting_process(self, root_q: int, p_root: int, target_partitions: list[int], tree: nx.DiGraph) -> None:
@@ -441,6 +481,11 @@ class TeleportationManager:
             epr = self.build_epr_circuit()
             self.qc.append(epr, [comm0, comm1])
             edges_to_comms[(p0, p1)] = (comm0, comm1)
+        _debug_extraction(
+            "build_k_fold_starting_process:edges",
+            "root=", root_q,
+            {edge: (str(q0), str(q1)) for edge, (q0, q1) in edges_to_comms.items()},
+        )
 
         from collections import deque
         root_q_phys = self.qubit_manager.log_to_phys_idx[root_q]
@@ -510,6 +555,11 @@ class TeleportationManager:
             self.creg_manager.release_cbit(cbit)
             del node_in_comm[aux]  
 
+        _debug_extraction(
+            "build_k_fold_starting_process:return",
+            "root=", root_q,
+            {p: str(q) for p, q in node_in_comm.items()},
+        )
         return node_in_comm
 class PartitionedCircuitExtractor:
     """
@@ -732,6 +782,29 @@ class PartitionedCircuitExtractor:
         else:
             q1_mapped = q1
 
+        _debug_extraction(
+            "apply_non_local_two_qubit_gate",
+            "gate=", gate,
+            "current_assignment=", self.current_assignment,
+            "p_root=", p_root,
+            "p1=", p1,
+            "common_part=", common_part,
+            "root_group=", root_q in self.qubit_manager.groups,
+            "q1_group=", q1 in self.qubit_manager.groups,
+            "root_mapped=", str(root_q_mapped),
+            "q1_mapped=", str(q1_mapped),
+            "root_linked=", (
+                {p: str(q) for p, q in self.qubit_manager.groups[root_q]['linked_qubits'].items()}
+                if root_q in self.qubit_manager.groups
+                else None
+            ),
+            "q1_linked=", (
+                {p: str(q) for p, q in self.qubit_manager.groups[q1]['linked_qubits'].items()}
+                if q1 in self.qubit_manager.groups
+                else None
+            ),
+        )
+
         if not self.check_qpus_local(qubit0=root_q_mapped, qubit1=q1_mapped):
             print(f"Non-local two-qubit gate {gate} cannot be applied locally.")
             print("Root qubit:", root_q, "Q1 qubit:", q1)
@@ -898,11 +971,30 @@ class PartitionedCircuitExtractor:
 
         linked_qubits = {p_root : self.qubit_manager.log_to_phys_idx[root_idx]}
         self.qubit_manager.groups[root_idx]['linked_qubits'] = linked_qubits
+        _debug_extraction(
+            "process_group_gate:init",
+            "time=", t,
+            "root=", root_idx,
+            "p_root=", p_root,
+            "p_root_set=", sorted(p_root_set),
+            "p_rec_set=", sorted(p_rec_set),
+            "final_p_root=", final_p_root,
+            "linked=", {p: str(q) for p, q in linked_qubits.items()},
+            "sub_gates=", sub_gates,
+        )
 
 
         target_partitions = list(p_rec_set.union(p_root_set) - {p_root})
 
         target_qubits = self.teleportation_manager.entangle_root_on_tree(root_idx, target_partitions, p_root, self.num_partitions, group_gate=True)
+        _debug_extraction(
+            "process_group_gate:after_entangle",
+            "time=", t,
+            "root=", root_idx,
+            "targets=", target_partitions,
+            "returned=", {p: str(q) for p, q in target_qubits.items()} if target_qubits else {},
+            "linked=", {p: str(q) for p, q in self.qubit_manager.groups[root_idx]['linked_qubits'].items()},
+        )
 
 
 

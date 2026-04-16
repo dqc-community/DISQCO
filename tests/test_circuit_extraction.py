@@ -5,6 +5,11 @@ Tests the PartitionedCircuitExtractor class for extracting distributed quantum
 circuits from hypergraphs with both initial (unoptimized) and optimized assignments.
 """
 
+import pathlib
+import random as _random_module
+import sys
+from contextlib import contextmanager
+
 import pytest
 import numpy as np
 from qiskit import QuantumCircuit, transpile
@@ -13,6 +18,25 @@ from disqco import QuantumNetwork, QuantumCircuitHyperGraph, PartitionedCircuitE
 from disqco.circuits.cp_fraction import cp_fraction
 from disqco.parti import FiducciaMattheyses
 from disqco import set_initial_partition_assignment
+from disqco.graphs.coarsening.coarsener import HypergraphCoarsener
+
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+DQCOMP_ROOT = REPO_ROOT / "dqcomp"
+QASMBENCH_ROOT = REPO_ROOT / "QASMBench"
+
+if str(DQCOMP_ROOT) not in sys.path:
+    sys.path.insert(0, str(DQCOMP_ROOT))
+
+
+@contextmanager
+def _fixed_random_seed(seed: int = 42):
+    original_seed = _random_module.seed
+    _random_module.seed = lambda *args, **kwargs: original_seed(seed)
+    try:
+        yield
+    finally:
+        _random_module.seed = original_seed
 
 
 @pytest.fixture
@@ -355,3 +379,42 @@ def test_extractor_with_single_partition():
     assert epr_count == 0
     
     print(f"\n✓ Single partition extraction: {epr_count} EPR pairs (expected 0)")
+
+
+def test_multilevel_variational_n4_extraction_regression():
+    """Regression: multilevel FM variational_n4 should extract without locality failure."""
+    from bosonic_model.qasm import Translator
+    from bosonic_converters import CircuitConverters
+    from bosonic_sdk.distributor.distributors.disqco_distributor import DisqcoDistributor
+
+    qasm_path = QASMBENCH_ROOT / "small" / "variational_n4" / "variational_n4.qasm"
+    qasm_text = qasm_path.read_text()
+
+    circuit = DisqcoDistributor._normalize_for_disqco(
+        CircuitConverters.to_qiskit(Translator().from_qasm(qasm_text))
+    )
+
+    hypergraph = QuantumCircuitHyperGraph(circuit)
+    network = QuantumNetwork.create([3, 3], "all_to_all")
+    initial_assignment = set_initial_partition_assignment(hypergraph, network)
+    partitioner = FiducciaMattheyses(
+        circuit,
+        network,
+        initial_assignment,
+        hypergraph=hypergraph,
+    )
+    with _fixed_random_seed(42):
+        results = partitioner.multilevel_partition(
+            coarsener=HypergraphCoarsener().coarsen_recursive_batches_mapped,
+            passes_per_level=10,
+        )
+
+    extractor = PartitionedCircuitExtractor(
+        graph=hypergraph,
+        network=network,
+        partition_assignment=results["best_assignment"],
+    )
+    partitioned_circuit = extractor.extract_partitioned_circuit()
+
+    assert partitioned_circuit is not None
+    assert isinstance(partitioned_circuit, QuantumCircuit)
