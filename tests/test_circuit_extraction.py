@@ -5,9 +5,9 @@ Tests the PartitionedCircuitExtractor class for extracting distributed quantum
 circuits from hypergraphs with both initial (unoptimized) and optimized assignments.
 """
 
-import pathlib
 import random as _random_module
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 import numpy as np
@@ -20,8 +20,7 @@ from disqco import set_initial_partition_assignment
 from disqco.graphs.coarsening.coarsener import HypergraphCoarsener
 
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-QASMBENCH_ROOT = REPO_ROOT / "QASMBench"
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "circuits"
 
 
 @contextmanager
@@ -397,10 +396,7 @@ def test_extractor_with_single_partition():
 
 def test_multilevel_variational_n4_extraction_regression():
     """Regression: multilevel FM variational_n4 should extract without locality failure."""
-    qasm_path = QASMBENCH_ROOT / "small" / "variational_n4" / "variational_n4.qasm"
-    qasm_text = qasm_path.read_text()
-
-    circuit = _normalize_qasm_for_disqco(qasm_text)
+    circuit = _normalize_qasm_for_disqco((FIXTURES_DIR / "variational_n4.qasm").read_text())
 
     hypergraph = QuantumCircuitHyperGraph(circuit)
     network = QuantumNetwork.create([3, 3], "all_to_all")
