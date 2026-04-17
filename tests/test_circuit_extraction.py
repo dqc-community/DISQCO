@@ -5,8 +5,6 @@ Tests the PartitionedCircuitExtractor class for extracting distributed quantum
 circuits from hypergraphs with both initial (unoptimized) and optimized assignments.
 """
 
-import random as _random_module
-from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -21,35 +19,6 @@ from disqco.graphs.coarsening.coarsener import HypergraphCoarsener
 
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "circuits"
-
-
-@contextmanager
-def _fixed_random_seed(seed: int = 42):
-    original_seed = _random_module.seed
-    _random_module.seed = lambda *args, **kwargs: original_seed(seed)
-    try:
-        yield
-    finally:
-        _random_module.seed = original_seed
-
-
-def _normalize_qasm_for_disqco(qasm_text: str) -> QuantumCircuit:
-    loaded = qasm2.loads(qasm_text)
-    stripped = QuantumCircuit(loaded.num_qubits)
-    for ci in loaded.data:
-        name = ci.operation.name.lower()
-        if name in {"measure", "reset", "barrier", "if_else", "delay"}:
-            continue
-        if ci.clbits:
-            continue
-        remapped_qubits = [stripped.qubits[loaded.find_bit(q).index] for q in ci.qubits]
-        stripped.append(ci.operation, remapped_qubits, [])
-
-    return transpile(
-        stripped,
-        basis_gates=["u", "cp", "cx"],
-        optimization_level=1,
-    )
 
 
 @pytest.fixture
@@ -396,7 +365,7 @@ def test_extractor_with_single_partition():
 
 def test_multilevel_variational_n4_extraction_regression():
     """Regression: multilevel FM variational_n4 should extract without locality failure."""
-    circuit = _normalize_qasm_for_disqco((FIXTURES_DIR / "variational_n4.qasm").read_text())
+    circuit = qasm2.load(FIXTURES_DIR / "variational_n4_transpiled.qasm", custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS)
 
     hypergraph = QuantumCircuitHyperGraph(circuit)
     network = QuantumNetwork.create([3, 3], "all_to_all")
@@ -407,11 +376,10 @@ def test_multilevel_variational_n4_extraction_regression():
         initial_assignment,
         hypergraph=hypergraph,
     )
-    with _fixed_random_seed(42):
-        results = partitioner.multilevel_partition(
-            coarsener=HypergraphCoarsener().coarsen_recursive_batches_mapped,
-            passes_per_level=10,
-        )
+    results = partitioner.multilevel_partition(
+        coarsener=HypergraphCoarsener().coarsen_recursive_batches_mapped,
+        passes_per_level=10,
+    )
 
     extractor = PartitionedCircuitExtractor(
         graph=hypergraph,
