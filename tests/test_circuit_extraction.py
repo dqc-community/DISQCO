@@ -363,8 +363,10 @@ def test_extractor_with_single_partition():
     print(f"\n✓ Single partition extraction: {epr_count} EPR pairs (expected 0)")
 
 
-def test_multilevel_variational_n4_extraction_regression():
-    """Regression: multilevel FM variational_n4 should extract without locality failure."""
+def test_group_closed_when_all_subgates_applied_immediately():
+    """Regression: groups whose last two-qubit gate lands at the current time step must have
+    close_group called explicitly, otherwise the root qubit stays marked as grouped and
+    subsequent teleportation logic silently skips it, producing an incorrect circuit."""
     circuit = qasm2.load(FIXTURES_DIR / "variational_n4_transpiled.qasm", custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS)
 
     hypergraph = QuantumCircuitHyperGraph(circuit)

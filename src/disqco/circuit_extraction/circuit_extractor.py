@@ -949,9 +949,7 @@ class PartitionedCircuitExtractor:
                 else:
                     self.layer_dict[time_step].append(sub_gate)
 
-        # Groups whose last two-qubit interaction is applied immediately never hit the
-        # delayed linked-gate path, so they must be closed explicitly here. Otherwise
-        # the root qubit remains marked as grouped and later teleportation skips it.
+        # See test_group_closed_when_all_subgates_applied_immediately
         if root_idx in self.qubit_manager.groups and final_t == t:
             self.teleportation_manager.close_group(root_idx)
 
