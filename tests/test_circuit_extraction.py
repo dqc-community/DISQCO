@@ -150,6 +150,44 @@ def test_k1_chain_intermediate_node_raises_at_limit():
         )
 
 
+def test_k2_chain_allows_intermediate_node():
+    circuit = QuantumCircuit(3)
+    hypergraph = QuantumCircuitHyperGraph(circuit)
+    network = QuantumNetwork.create([1, 1, 1], "linear")
+    assignment = np.array([[0, 1, 2]])
+    extractor = PartitionedCircuitExtractor(
+        graph=hypergraph,
+        network=network,
+        partition_assignment=assignment,
+        max_comm_qubits_per_node=2,
+    )
+    tree = nx.DiGraph([(0, 1), (1, 2)])
+
+    extractor.teleportation_manager.build_k_fold_starting_process(
+        root_q=0,
+        p_root=0,
+        target_partitions=[2],
+        tree=tree,
+    )
+
+    assert extractor.comm_manager.get_peak_comm_usage(1) == 2
+
+
+def test_invalid_max_comm_qubits_per_node_raises():
+    circuit = QuantumCircuit(1)
+    hypergraph = QuantumCircuitHyperGraph(circuit)
+    network = QuantumNetwork.create([1], "all_to_all")
+    assignment = np.array([[0]])
+
+    with pytest.raises(ValueError, match="max_comm_qubits_per_node must be >= 1 or None"):
+        PartitionedCircuitExtractor(
+            graph=hypergraph,
+            network=network,
+            partition_assignment=assignment,
+            max_comm_qubits_per_node=0,
+        )
+
+
 def test_unbounded_matches_current_behaviour():
     implicit_unbounded = _star_extractor()
     explicit_unbounded = _star_extractor(max_comm_qubits_per_node=None)
@@ -166,6 +204,14 @@ def test_find_comm_idx_raises_at_limit():
 
     with pytest.raises(CommunicationQubitLimitError, match="Node 0.*limit of 1.*currently in use"):
         manager.find_comm_idx(0)
+
+
+def test_invalid_manager_max_comm_qubits_raises():
+    comm_reg = QuantumRegister(1, name="C0_0")
+    qc = QuantumCircuit(comm_reg)
+
+    with pytest.raises(ValueError, match="max_comm_qubits must be >= 1 or None"):
+        CommunicationQubitManager({0: [comm_reg]}, qc, max_comm_qubits=0)
 
 
 def test_get_peak_comm_usage():
