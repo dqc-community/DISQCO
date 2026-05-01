@@ -5,16 +5,30 @@ import copy
 # -------------------------------------------------------------------
 # CommunicationQubitManager
 # -------------------------------------------------------------------
+class CommunicationQubitLimitError(RuntimeError):
+    pass
+
+
 class CommunicationQubitManager:
     """
     Manages communication qubits on a per-partition basis. Allocates communication qubits for tasks 
     requiring entanglement and releases them when done.
     """
-    def __init__(self, comm_qregs: dict, qc: QuantumCircuit):
+    def __init__(
+        self,
+        comm_qregs: dict,
+        qc: QuantumCircuit,
+        max_comm_qubits: int | None = None,
+    ):
+        if max_comm_qubits is not None and max_comm_qubits < 1:
+            raise ValueError("max_comm_qubits must be >= 1 or None")
+
         self.qc = qc  # Store copy of the QuantumCircuit
         self.comm_qregs = comm_qregs  # Store the QuantumRegisters for communication qubits
+        self.max_comm_qubits = max_comm_qubits
         self.free_comm = {}  # Store free communication qubits for each partition
         self.in_use_comm = {}  # Store in-use communication qubits for each partition
+        self._peak_comm_usage = {}
         # self.linked_qubits = {}  # Store comm qubits linked to root qubits for gate teleportation
 
         self.initilize_communication_qubits()
@@ -38,6 +52,15 @@ class CommunicationQubitManager:
         if free_comm_p:
             comm_qubit = free_comm_p.pop(0)
         else:
+            if (
+                self.max_comm_qubits is not None
+                and len(self.in_use_comm[p]) >= self.max_comm_qubits
+            ):
+                raise CommunicationQubitLimitError(
+                    f"Node {p} has reached its comm qubit limit of "
+                    f"{self.max_comm_qubits} ({len(self.in_use_comm[p])} "
+                    "currently in use)."
+                )
             # Create a new communication qubit by adding a new register
             num_regs_p = len(self.comm_qregs[p])
             new_reg = QuantumRegister(1, name=f"C{p}_{num_regs_p}")
@@ -46,6 +69,10 @@ class CommunicationQubitManager:
             comm_qubit = new_reg[0]
 
         self.in_use_comm[p].add(comm_qubit)
+        self._peak_comm_usage[p] = max(
+            self._peak_comm_usage.get(p, 0),
+            len(self.in_use_comm[p]),
+        )
 
         return comm_qubit
 
@@ -62,6 +89,12 @@ class CommunicationQubitManager:
         Return a tuple (in_use, free) for partition p.
         """
         return self.in_use_comm.get(p, []), self.free_comm.get(p, [])
+
+    def get_peak_comm_usage(self, p: int) -> int:
+        """
+        Return the maximum number of comm qubits simultaneously in-use in partition p.
+        """
+        return self._peak_comm_usage.get(p, 0)
 
 # -------------------------------------------------------------------
 # ClassicalBitManager

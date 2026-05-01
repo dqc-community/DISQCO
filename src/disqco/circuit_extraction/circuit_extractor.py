@@ -433,15 +433,6 @@ class TeleportationManager:
         Generates EPR pairs, applies CNOTs, measures, and applies classical corrections along the tree.
         Handles branching and sums measurement results modulo 2 along each branch.
         """
-        # Generate EPR pairs for all edges
-        edges_to_comms = {}
-        for p0, p1 in tree.edges():
-            comm0 = self.comm_manager.find_comm_idx(p0)
-            comm1 = self.comm_manager.find_comm_idx(p1)
-            epr = self.build_epr_circuit()
-            self.qc.append(epr, [comm0, comm1])
-            edges_to_comms[(p0, p1)] = (comm0, comm1)
-
         from collections import deque
         root_q_phys = self.qubit_manager.log_to_phys_idx[root_q]
         # For each node, store the path from root and the classical bits for measurements
@@ -457,7 +448,10 @@ class TeleportationManager:
             children = list(tree.successors(current))
             in_qubit = node_in_comm[current]
             for child in children:
-                comm_current, comm_child = edges_to_comms[(current, child)]
+                comm_current = self.comm_manager.find_comm_idx(current)
+                comm_child = self.comm_manager.find_comm_idx(child)
+                epr = self.build_epr_circuit()
+                self.qc.append(epr, [comm_current, comm_child])
                 self.qc.cx(in_qubit, comm_current)
                 cbit = self.creg_manager.allocate_cbit()
                 self.qc.measure(comm_current, cbit)
@@ -529,8 +523,11 @@ class PartitionedCircuitExtractor:
         self,
         graph: QuantumCircuitHyperGraph,
         network: QuantumNetwork,
-        partition_assignment: np.ndarray
+        partition_assignment: np.ndarray,
+        max_comm_qubits_per_node: int | None = None,
     ) -> None:
+        if max_comm_qubits_per_node is not None and max_comm_qubits_per_node < 1:
+            raise ValueError("max_comm_qubits_per_node must be >= 1 or None")
         
         # The gate edges of the graph stored as a list of gates and gate groups.
         self.layer_dict = graph.layers
@@ -545,6 +542,7 @@ class PartitionedCircuitExtractor:
         self.graph = graph
         self.network = network
         self.basis_gates = graph.basis_gates
+        self.max_comm_qubits_per_node = max_comm_qubits_per_node
 
 
         # Create the quantum registers for the data qubits and communication qubits.
@@ -560,7 +558,11 @@ class PartitionedCircuitExtractor:
         self.qubit_manager = DataQubitManager(self.partition_qregs, self.num_qubits,
                                               self.partition_assignment, self.qc)
         
-        self.comm_manager = CommunicationQubitManager(self.comm_qregs, self.qc)
+        self.comm_manager = CommunicationQubitManager(
+            self.comm_qregs,
+            self.qc,
+            max_comm_qubits=max_comm_qubits_per_node,
+        )
         self.creg_manager = ClassicalBitManager(self.qc, self.creg)
 
         # Create the teleportation manager.

@@ -7,11 +7,16 @@ circuits from hypergraphs with both initial (unoptimized) and optimized assignme
 
 from pathlib import Path
 
+import networkx as nx
 import pytest
 import numpy as np
-from qiskit import QuantumCircuit, qasm2, transpile
+from qiskit import QuantumCircuit, qasm2, transpile, QuantumRegister
 
 from disqco import QuantumNetwork, QuantumCircuitHyperGraph, PartitionedCircuitExtractor
+from disqco.circuit_extraction.DQC_qubit_manager import (
+    CommunicationQubitLimitError,
+    CommunicationQubitManager,
+)
 from disqco.circuits.cp_fraction import cp_fraction
 from disqco.parti import FiducciaMattheyses
 from disqco import set_initial_partition_assignment
@@ -81,6 +86,81 @@ def test_circuit_extractor_instantiation(test_hypergraph, test_network, initial_
     assert np.array_equal(extractor.partition_assignment, initial_assignment)
     
     print("\n✓ PartitionedCircuitExtractor instantiated successfully")
+
+
+def _star_extractor(max_comm_qubits_per_node=None):
+    circuit = QuantumCircuit(3)
+    hypergraph = QuantumCircuitHyperGraph(circuit)
+    network = QuantumNetwork.create([1, 1, 1], "all_to_all")
+    assignment = np.array([[0, 1, 2]])
+    extractor = PartitionedCircuitExtractor(
+        graph=hypergraph,
+        network=network,
+        partition_assignment=assignment,
+        max_comm_qubits_per_node=max_comm_qubits_per_node,
+    )
+    tree = nx.DiGraph([(0, 1), (0, 2)])
+    extractor.teleportation_manager.build_k_fold_starting_process(
+        root_q=0,
+        p_root=0,
+        target_partitions=[1, 2],
+        tree=tree,
+    )
+    return extractor
+
+
+def _comm_qubit_count(circuit):
+    return sum(reg.size for reg in circuit.qregs if reg.name.startswith("C"))
+
+
+def test_k1_star_gate_uses_one_comm_qubit_per_node():
+    extractor = _star_extractor(max_comm_qubits_per_node=1)
+
+    assert _comm_qubit_count(extractor.qc) == 3
+    assert extractor.comm_manager.get_peak_comm_usage(0) == 1
+    assert extractor.comm_manager.get_peak_comm_usage(1) == 1
+    assert extractor.comm_manager.get_peak_comm_usage(2) == 1
+
+
+def test_k2_allows_two_comm_qubits_per_node():
+    extractor = _star_extractor(max_comm_qubits_per_node=2)
+
+    assert _comm_qubit_count(extractor.qc) <= 6
+
+
+def test_unbounded_matches_current_behaviour():
+    implicit_unbounded = _star_extractor()
+    explicit_unbounded = _star_extractor(max_comm_qubits_per_node=None)
+
+    assert qasm2.dumps(explicit_unbounded.qc) == qasm2.dumps(implicit_unbounded.qc)
+
+
+def test_find_comm_idx_raises_at_limit():
+    comm_reg = QuantumRegister(1, name="C0_0")
+    qc = QuantumCircuit(comm_reg)
+    manager = CommunicationQubitManager({0: [comm_reg]}, qc, max_comm_qubits=1)
+
+    manager.find_comm_idx(0)
+
+    with pytest.raises(CommunicationQubitLimitError, match="Node 0.*limit of 1.*currently in use"):
+        manager.find_comm_idx(0)
+
+
+def test_get_peak_comm_usage():
+    comm_reg = QuantumRegister(1, name="C0_0")
+    qc = QuantumCircuit(comm_reg)
+    manager = CommunicationQubitManager({0: [comm_reg]}, qc)
+
+    first = manager.find_comm_idx(0)
+    second = manager.find_comm_idx(0)
+    assert manager.get_peak_comm_usage(0) == 2
+
+    manager.release_comm_qubit(0, first)
+    manager.release_comm_qubit(0, second)
+    third = manager.find_comm_idx(0)
+
+    assert manager.get_peak_comm_usage(0) == 2
+    manager.release_comm_qubit(0, third)
 
 
 def test_extract_circuit_with_initial_assignment(test_hypergraph, test_network, initial_assignment):
