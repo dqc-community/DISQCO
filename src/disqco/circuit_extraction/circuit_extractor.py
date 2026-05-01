@@ -1,4 +1,5 @@
 import copy
+from dataclasses import dataclass
 import numpy as np
 import networkx as nx
 from qiskit import QuantumRegister, ClassicalRegister, QuantumCircuit, transpile
@@ -7,6 +8,89 @@ from disqco import QuantumCircuitHyperGraph
 from disqco import QuantumNetwork
 from disqco.circuit_extraction.DQC_qubit_manager import DataQubitManager, CommunicationQubitManager, ClassicalBitManager
 import math as mt
+
+
+@dataclass(frozen=True)
+class CommLease:
+    """
+    Records ownership of a communication qubit for scheduler-level reasoning.
+    """
+    node: int
+    qubit: Qubit
+    owner: str
+    persistent: bool = False
+
+
+@dataclass(frozen=True)
+class StartingProcessEdgeResult:
+    """
+    Result of scheduling one edge in a k-fold starting process.
+    """
+    child_comm: Qubit
+    child_lease: CommLease
+    cbit: object
+
+
+class CommunicationQubitScheduler:
+    """
+    Emits communication-qubit operations in an order that can respect manager limits.
+
+    The manager owns the physical pool and raises when K is exceeded. The scheduler owns
+    local ordering: for k-fold starting-process edges it releases the parent-side lease
+    immediately after measurement, while returning the child-side lease to stay live for
+    later corrections or grouped-gate use.
+    """
+    def __init__(
+        self,
+        qc: QuantumCircuit,
+        comm_manager: CommunicationQubitManager,
+        creg_manager: ClassicalBitManager,
+        epr_builder,
+    ) -> None:
+        self.qc = qc
+        self.comm_manager = comm_manager
+        self.creg_manager = creg_manager
+        self.epr_builder = epr_builder
+
+    def run_starting_process_edge(
+        self,
+        *,
+        current: int,
+        child: int,
+        in_qubit: Qubit,
+        owner: str,
+    ) -> StartingProcessEdgeResult:
+        parent_comm = self.comm_manager.find_comm_idx(current)
+        child_comm = self.comm_manager.find_comm_idx(child)
+        parent_lease = CommLease(
+            node=current,
+            qubit=parent_comm,
+            owner=f"{owner}:edge:{current}->{child}:parent",
+        )
+        child_lease = CommLease(
+            node=child,
+            qubit=child_comm,
+            owner=f"{owner}:edge:{current}->{child}:child",
+            persistent=True,
+        )
+
+        epr = self.epr_builder()
+        self.qc.append(epr, [parent_lease.qubit, child_lease.qubit])
+        self.qc.cx(in_qubit, parent_lease.qubit)
+        cbit = self.creg_manager.allocate_cbit()
+        self.qc.measure(parent_lease.qubit, cbit)
+        self.qc.reset(parent_lease.qubit)
+        self.release(parent_lease)
+
+        return StartingProcessEdgeResult(
+            child_comm=child_lease.qubit,
+            child_lease=child_lease,
+            cbit=cbit,
+        )
+
+    def release(self, lease: CommLease) -> None:
+        self.comm_manager.release_comm_qubit(lease.node, lease.qubit)
+
 
 # -------------------------------------------------------------------
 # TeleportationManager
@@ -39,6 +123,12 @@ class TeleportationManager:
         self.comm_manager = comm_manager
         self.creg_manager = creg_manager
         self.hypergraph = hypergraph
+        self.comm_scheduler = CommunicationQubitScheduler(
+            qc=self.qc,
+            comm_manager=self.comm_manager,
+            creg_manager=self.creg_manager,
+            epr_builder=self.build_epr_circuit,
+        )
 
     def build_state_transfer_circuit(self) -> Instruction:
         """
@@ -440,6 +530,7 @@ class TeleportationManager:
         node_cbits = {p_root: []}
         # For each node, store the incoming EPR half (from parent)
         node_in_comm = {p_root: root_q_phys}
+        node_leases: dict[int, CommLease] = {}
         queue = deque([p_root])
 
         correction_info = []  # List of tuples: (comm_child, node_cbits[child])
@@ -448,21 +539,20 @@ class TeleportationManager:
             children = list(tree.successors(current))
             in_qubit = node_in_comm[current]
             for child in children:
-                comm_current = self.comm_manager.find_comm_idx(current)
-                comm_child = self.comm_manager.find_comm_idx(child)
-                epr = self.build_epr_circuit()
-                self.qc.append(epr, [comm_current, comm_child])
-                self.qc.cx(in_qubit, comm_current)
-                cbit = self.creg_manager.allocate_cbit()
-                self.qc.measure(comm_current, cbit)
-                self.qc.reset(comm_current)
+                edge_result = self.comm_scheduler.run_starting_process_edge(
+                    current=current,
+                    child=child,
+                    in_qubit=in_qubit,
+                    owner=f"k_fold_starting_process:root={root_q}",
+                )
                 node_paths[child] = node_paths[current] + [child]
-                node_cbits[child] = node_cbits[current] + [cbit]
-                node_in_comm[child] = comm_child
-                correction_info.append((comm_child, list(node_cbits[child]), cbit))
+                node_cbits[child] = node_cbits[current] + [edge_result.cbit]
+                node_in_comm[child] = edge_result.child_comm
+                node_leases[child] = edge_result.child_lease
+                correction_info.append(
+                    (edge_result.child_comm, list(node_cbits[child]), edge_result.cbit)
+                )
                 queue.append(child)
-                # Release comm qubit from parent (current)
-                self.comm_manager.release_comm_qubit(current, comm_current)
 
         for comm_child, cbits, last_cbit in correction_info:
             for cb in cbits:
@@ -500,7 +590,16 @@ class TeleportationManager:
             cbit = self.creg_manager.allocate_cbit()
             ending_instr = self.build_ending_process_circuit()
             self.qc.append(ending_instr, [live_epr, local_epr], [cbit])
-            self.comm_manager.release_comm_qubit(aux, local_epr)
+            self.comm_scheduler.release(
+                node_leases.get(
+                    aux,
+                    CommLease(
+                        node=aux,
+                        qubit=local_epr,
+                        owner=f"k_fold_starting_process:root={root_q}:aux={aux}",
+                    ),
+                )
+            )
             self.creg_manager.release_cbit(cbit)
             del node_in_comm[aux]  
 

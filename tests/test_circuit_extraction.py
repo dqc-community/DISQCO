@@ -128,6 +128,28 @@ def test_k2_allows_two_comm_qubits_per_node():
     assert _comm_qubit_count(extractor.qc) <= 6
 
 
+def test_k1_chain_intermediate_node_raises_at_limit():
+    circuit = QuantumCircuit(3)
+    hypergraph = QuantumCircuitHyperGraph(circuit)
+    network = QuantumNetwork.create([1, 1, 1], "linear")
+    assignment = np.array([[0, 1, 2]])
+    extractor = PartitionedCircuitExtractor(
+        graph=hypergraph,
+        network=network,
+        partition_assignment=assignment,
+        max_comm_qubits_per_node=1,
+    )
+    tree = nx.DiGraph([(0, 1), (1, 2)])
+
+    with pytest.raises(CommunicationQubitLimitError, match="Node 1.*limit of 1"):
+        extractor.teleportation_manager.build_k_fold_starting_process(
+            root_q=0,
+            p_root=0,
+            target_partitions=[2],
+            tree=tree,
+        )
+
+
 def test_unbounded_matches_current_behaviour():
     implicit_unbounded = _star_extractor()
     explicit_unbounded = _star_extractor(max_comm_qubits_per_node=None)
