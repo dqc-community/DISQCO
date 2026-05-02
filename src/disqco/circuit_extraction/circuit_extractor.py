@@ -18,7 +18,6 @@ class CommLease:
     node: int
     qubit: Qubit
     owner: str
-    persistent: bool = False
 
 
 @dataclass(frozen=True)
@@ -71,7 +70,6 @@ class CommunicationQubitScheduler:
             node=child,
             qubit=child_comm,
             owner=f"{owner}:edge:{current}->{child}:child",
-            persistent=True,
         )
 
         epr = self.epr_builder()
@@ -590,16 +588,10 @@ class TeleportationManager:
             cbit = self.creg_manager.allocate_cbit()
             ending_instr = self.build_ending_process_circuit()
             self.qc.append(ending_instr, [live_epr, local_epr], [cbit])
-            self.comm_scheduler.release(
-                node_leases.get(
-                    aux,
-                    CommLease(
-                        node=aux,
-                        qubit=local_epr,
-                        owner=f"k_fold_starting_process:root={root_q}:aux={aux}",
-                    ),
-                )
+            assert aux in node_leases, (
+                f"No lease found for aux node {aux} — every BFS child should have a lease"
             )
+            self.comm_scheduler.release(node_leases[aux])
             self.creg_manager.release_cbit(cbit)
             del node_in_comm[aux]  
 
@@ -625,9 +617,6 @@ class PartitionedCircuitExtractor:
         partition_assignment: np.ndarray,
         max_comm_qubits_per_node: int | None = None,
     ) -> None:
-        if max_comm_qubits_per_node is not None and max_comm_qubits_per_node < 1:
-            raise ValueError("max_comm_qubits_per_node must be >= 1 or None")
-        
         # The gate edges of the graph stored as a list of gates and gate groups.
         self.layer_dict = graph.layers
         self.layer_dict = self.remove_empty_groups()

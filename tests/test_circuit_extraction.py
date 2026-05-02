@@ -179,7 +179,7 @@ def test_invalid_max_comm_qubits_per_node_raises():
     network = QuantumNetwork.create([1], "all_to_all")
     assignment = np.array([[0]])
 
-    with pytest.raises(ValueError, match="max_comm_qubits_per_node must be >= 1 or None"):
+    with pytest.raises(ValueError, match="must be >= 1 or None"):
         PartitionedCircuitExtractor(
             graph=hypergraph,
             network=network,
