@@ -84,6 +84,15 @@ class CommunicationQubitManager:
             self.in_use_comm[p].remove(comm_qubit)
             self.free_comm[p].append(comm_qubit)
 
+    def has_capacity(self, p: int, n: int = 1) -> bool:
+        """
+        Return True if `n` more comm qubits can be allocated in partition p without
+        exceeding the configured limit. When max_comm_qubits is None, always True.
+        """
+        if self.max_comm_qubits is None:
+            return True
+        return self.max_comm_qubits - len(self.in_use_comm.get(p, set())) >= n
+
     def get_status(self, p: int) -> tuple[list, list]:
         """
         Return a tuple (in_use, free) for partition p.

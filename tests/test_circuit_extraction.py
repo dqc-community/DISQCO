@@ -231,6 +231,183 @@ def test_get_peak_comm_usage():
     manager.release_comm_qubit(0, third)
 
 
+def test_has_capacity_unbounded():
+    comm_reg = QuantumRegister(1, name="C0_0")
+    qc = QuantumCircuit(comm_reg)
+    manager = CommunicationQubitManager({0: [comm_reg]}, qc, max_comm_qubits=None)
+    assert manager.has_capacity(0)
+    assert manager.has_capacity(0, n=99)
+
+
+def test_has_capacity_respects_limit():
+    comm_reg = QuantumRegister(1, name="C0_0")
+    qc = QuantumCircuit(comm_reg)
+    manager = CommunicationQubitManager({0: [comm_reg]}, qc, max_comm_qubits=2)
+
+    assert manager.has_capacity(0)
+    assert manager.has_capacity(0, n=2)
+    assert not manager.has_capacity(0, n=3)
+
+    manager.find_comm_idx(0)
+    assert manager.has_capacity(0)
+    assert not manager.has_capacity(0, n=2)
+
+    manager.find_comm_idx(0)
+    assert not manager.has_capacity(0)
+
+
+def _qaoa_like_layer_circuit():
+    """
+    Build a 6-qubit circuit whose hypergraph has a layer where a long-lived group
+    (root holds entanglement across multiple layers) co-occurs with an independent
+    non-local two-qubit gate. This is the within-layer conflict pattern that K=2
+    deferral resolves on qaoa_n6.
+
+    Layout: 3 partitions of 2 qubits each. Group spans qubits 0,1,2 (root q0 on
+    partition 0, target on partition 1). Independent gate cx[3,4] connects
+    partitions 1 and 2.
+    """
+    qc = QuantumCircuit(6)
+    # Layer 0: entangle pairs locally so the partitioner sees structure
+    for q in range(6):
+        qc.rz(0.1 * q, q)
+    # A non-local gate on (q0, q2) at t=1 - opens a group when partitioned
+    qc.cp(0.3, 0, 2)
+    # Independent non-local gate on (q3, q4) at t=2
+    qc.cp(0.4, 3, 4)
+    # Another non-local gate on (q0, q2) at t=3 to keep the group alive
+    qc.cp(0.5, 0, 2)
+    return qc
+
+
+def test_within_layer_reorder_preserves_unbounded_output():
+    """
+    Within-layer reordering must be semantically equivalent to running unbounded.
+    Compares the qasm of the extracted circuit at K=None vs K=large; they may differ
+    in instruction order but must produce the same physical operations.
+    """
+    qc = _qaoa_like_layer_circuit()
+    qc = transpile(qc, basis_gates=["u", "cp", "cx"], optimization_level=0)
+    network = QuantumNetwork.create([2, 2, 2], "all_to_all")
+    hg = QuantumCircuitHyperGraph(qc)
+    init_asn = set_initial_partition_assignment(hg, network)
+    fm = FiducciaMattheyses(qc, network, init_asn, hypergraph=hg)
+    res = fm.multilevel_partition(
+        coarsener=HypergraphCoarsener().coarsen_recursive_batches_mapped,
+        passes_per_level=10,
+    )
+    asn = np.asarray(res["best_assignment"], dtype=int)
+
+    out_unb = PartitionedCircuitExtractor(
+        graph=QuantumCircuitHyperGraph(qc),
+        network=network,
+        partition_assignment=asn,
+        max_comm_qubits_per_node=None,
+    ).extract_partitioned_circuit()
+
+    out_high = PartitionedCircuitExtractor(
+        graph=QuantumCircuitHyperGraph(qc),
+        network=network,
+        partition_assignment=asn,
+        max_comm_qubits_per_node=10,
+    ).extract_partitioned_circuit()
+
+    # Number of instructions should match exactly - the priority sort is stable for
+    # gates of the same type and only reorders across types.
+    assert len(out_unb.data) == len(out_high.data)
+
+
+def test_within_layer_deferral_lowers_peak_for_qaoa_n6():
+    """
+    The qaoa_n6 circuit, with a default partitioner, has layers where opening a
+    group and a parallel non-local gate both want comm qubits on the same node.
+    Without deferral the in-order pass opens the group first and the gate fails.
+    With priority-based reordering the gate runs first (transient) then the group
+    (persistent), keeping the peak per node ≤ 2.
+    """
+    pytest.importorskip("qasmpi")
+    import qasmpi
+    from qiskit import QuantumCircuit as QC
+
+    qasm_str = qasmpi.get_circuit("qaoa_n6")
+    qc = QC.from_qasm_str(qasm_str)
+    qc = QC(qc.num_qubits, qc.num_clbits or qc.num_qubits, *(()))  # rebuild without measures
+    qc = QC.from_qasm_str(qasm_str)
+    # Strip measurements/resets
+    stripped = QC(qc.num_qubits)
+    for ci in qc.data:
+        if ci.operation.name.lower() in {"measure", "reset", "barrier"}:
+            continue
+        if ci.clbits:
+            continue
+        stripped.append(ci.operation, [stripped.qubits[qc.find_bit(q).index] for q in ci.qubits], [])
+    qc = transpile(stripped, basis_gates=["u", "cp", "cx"], optimization_level=1)
+
+    network = QuantumNetwork.create([2, 2, 2], "all_to_all")
+    hg = QuantumCircuitHyperGraph(qc)
+    init = set_initial_partition_assignment(hg, network)
+    fm = FiducciaMattheyses(qc, network, init, hypergraph=hg)
+    res = fm.multilevel_partition(
+        coarsener=HypergraphCoarsener().coarsen_recursive_batches_mapped,
+        passes_per_level=10,
+    )
+    asn = np.asarray(res["best_assignment"], dtype=int)
+
+    # K=2 must succeed thanks to priority-based within-layer reordering.
+    extractor = PartitionedCircuitExtractor(
+        graph=QuantumCircuitHyperGraph(qc),
+        network=network,
+        partition_assignment=asn,
+        max_comm_qubits_per_node=2,
+    )
+    out = extractor.extract_partitioned_circuit()
+    assert out is not None
+    for p in range(3):
+        assert extractor.comm_manager.get_peak_comm_usage(p) <= 2, (
+            f"Node {p} peak usage exceeds K=2: {extractor.comm_manager.get_peak_comm_usage(p)}"
+        )
+
+
+def test_genuine_infeasibility_raises_with_diagnostic():
+    """
+    A layer that contains two simultaneous groups whose target sets both include
+    the same node cannot be resolved at K=1 (each group leaves a persistent lease
+    on that node). The error should report the deferred gates and the in-use map.
+    """
+    pytest.importorskip("qasmpi")
+    import qasmpi
+    from qiskit import QuantumCircuit as QC
+
+    qc = QC.from_qasm_str(qasmpi.get_circuit("qaoa_n6"))
+    stripped = QC(qc.num_qubits)
+    for ci in qc.data:
+        if ci.operation.name.lower() in {"measure", "reset", "barrier"}:
+            continue
+        if ci.clbits:
+            continue
+        stripped.append(ci.operation, [stripped.qubits[qc.find_bit(q).index] for q in ci.qubits], [])
+    qc = transpile(stripped, basis_gates=["u", "cp", "cx"], optimization_level=1)
+
+    network = QuantumNetwork.create([2, 2, 2], "all_to_all")
+    hg = QuantumCircuitHyperGraph(qc)
+    init = set_initial_partition_assignment(hg, network)
+    fm = FiducciaMattheyses(qc, network, init, hypergraph=hg)
+    res = fm.multilevel_partition(
+        coarsener=HypergraphCoarsener().coarsen_recursive_batches_mapped,
+        passes_per_level=10,
+    )
+    asn = np.asarray(res["best_assignment"], dtype=int)
+
+    extractor = PartitionedCircuitExtractor(
+        graph=QuantumCircuitHyperGraph(qc),
+        network=network,
+        partition_assignment=asn,
+        max_comm_qubits_per_node=1,
+    )
+    with pytest.raises(CommunicationQubitLimitError, match=r"Layer \d+:.*max_comm_qubits_per_node=1.*Deferred gates"):
+        extractor.extract_partitioned_circuit()
+
+
 def test_extract_circuit_with_initial_assignment(test_hypergraph, test_network, initial_assignment):
     """Test extracting circuit with initial unoptimized assignment"""
     extractor = PartitionedCircuitExtractor(

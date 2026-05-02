@@ -6,7 +6,12 @@ from qiskit import QuantumRegister, ClassicalRegister, QuantumCircuit, transpile
 from qiskit.circuit import Qubit, Instruction
 from disqco import QuantumCircuitHyperGraph
 from disqco import QuantumNetwork
-from disqco.circuit_extraction.DQC_qubit_manager import DataQubitManager, CommunicationQubitManager, ClassicalBitManager
+from disqco.circuit_extraction.DQC_qubit_manager import (
+    DataQubitManager,
+    CommunicationQubitManager,
+    CommunicationQubitLimitError,
+    ClassicalBitManager,
+)
 import math as mt
 
 
@@ -1058,38 +1063,149 @@ class PartitionedCircuitExtractor:
             self.current_assignment = new_assignment_layer
             self.partition_assignment[i] = new_assignment_layer
 
-            for gate in layer:
-                gtype = gate['type']
-
-                if gtype == "single-qubit":
-                    self.apply_single_qubit_gate(gate)
-
-                elif gtype == "two-qubit":
-                    q0, q1 = gate['qargs']
-                    p0 = self.current_assignment[q0]
-                    p1 = self.current_assignment[q1]
-                    if p0 == p1:
-                        self.apply_local_two_qubit_gate(gate)
-                    else:
-                        self.teleportation_manager.gate_teleport(q0, q1, gate, p0, p1)
-
-                elif gtype == "group":
-                    self.process_group_gate(gate, i)
-
-                elif gtype == "two-qubit-linked":
-
-                    q0, q1 = gate['qargs']
-                    p_root = self.qubit_manager.groups[q0]['init_p_root']
-                    p_rec = self.current_assignment[q1]
-
-                    self.apply_non_local_two_qubit_gate(gate, p_root, p_rec)
-
+            self._process_layer(layer, i)
 
         for i in range(self.num_qubits):
             self.qc.measure(self.qubit_manager.log_to_phys_idx[i], self.result_reg[i])
-        
+
         self.qc = reorder_registers_by_index(self.qc)
         return self.qc
+
+    _GATE_PRIORITY = {
+        # Lower number runs first. Phase 0: no-alloc gates. Phase 1: gates that may release
+        # leases (linked sub-gates can close their group). Phase 2: transient-only allocations
+        # that complete within the call. Phase 3: persistent allocations that hold leases
+        # across layers.
+        "single-qubit": 0,
+        "two-qubit-linked": 1,
+        "two-qubit": 2,
+        "group": 3,
+    }
+
+    def _process_layer(self, layer: list, t: int) -> None:
+        """
+        Process all gates in a single layer. Gates within a layer are independent by
+        construction (same time step in the input circuit), so reordering them is
+        semantically safe. We run them in priority order so that resource-releasing
+        gates fire before resource-grabbing ones, then defer-and-retry any that
+        still don't fit. If a full pass makes no progress the limit is genuinely
+        infeasible at this layer and we raise.
+        """
+        pending = sorted(layer, key=lambda g: self._GATE_PRIORITY.get(g['type'], 99))
+        while pending:
+            next_pending = []
+            progressed = False
+            for gate in pending:
+                if self._try_apply_gate(gate, t):
+                    progressed = True
+                else:
+                    next_pending.append(gate)
+            if not progressed:
+                in_use = {p: len(s) for p, s in self.comm_manager.in_use_comm.items()}
+                raise CommunicationQubitLimitError(
+                    f"Layer {t}: {len(next_pending)} gate(s) cannot fit within "
+                    f"max_comm_qubits_per_node={self.max_comm_qubits_per_node} "
+                    f"(in-use per node: {in_use}). Deferred gates: "
+                    f"{[(g['type'], g.get('name'), g.get('qargs', g.get('root'))) for g in next_pending]}"
+                )
+            pending = next_pending
+
+    def _try_apply_gate(self, gate: dict, t: int) -> bool:
+        """
+        Try to apply a single gate. Returns True if applied, False if the gate needs
+        comm qubits that aren't currently available (and so must be deferred). Gates
+        that don't allocate (single-qubit, local two-qubit, two-qubit-linked) always
+        succeed because they require no fresh comm-qubit allocation.
+        """
+        gtype = gate['type']
+
+        if gtype == "single-qubit":
+            self.apply_single_qubit_gate(gate)
+            return True
+
+        if gtype == "two-qubit":
+            q0, q1 = gate['qargs']
+            p0 = self.current_assignment[q0]
+            p1 = self.current_assignment[q1]
+            if p0 == p1:
+                self.apply_local_two_qubit_gate(gate)
+                return True
+            if not self._can_gate_teleport(p0, p1):
+                return False
+            self.teleportation_manager.gate_teleport(q0, q1, gate, p0, p1)
+            return True
+
+        if gtype == "group":
+            if not self._can_open_group(gate):
+                return False
+            self.process_group_gate(gate, t)
+            return True
+
+        if gtype == "two-qubit-linked":
+            q0, q1 = gate['qargs']
+            p_root = self.qubit_manager.groups[q0]['init_p_root']
+            p_rec = self.current_assignment[q1]
+            self.apply_non_local_two_qubit_gate(gate, p_root, p_rec)
+            return True
+
+        return True
+
+    def _can_gate_teleport(self, p_root: int, p_rec: int) -> bool:
+        if self.max_comm_qubits_per_node is None:
+            return True
+        if p_root == p_rec:
+            return self.comm_manager.has_capacity(p_root, n=2)
+        return (
+            self.comm_manager.has_capacity(p_root)
+            and self.comm_manager.has_capacity(p_rec)
+        )
+
+    def _can_open_group(self, gate: dict) -> bool:
+        """
+        Capacity precheck for opening a group. process_group_gate may allocate:
+          - 1 transient on p_root for nested state-teleport (held throughout group)
+          - 1 transient parent on p_root per BFS edge (released after each edge's measurement)
+          - 1 persistent child on each target partition (held until close_group)
+        Peak simultaneous on p_root = (1 if nested else 0) + 1 (parent of one edge at a time).
+        Each target needs 1 free slot.
+        """
+        if self.max_comm_qubits_per_node is None:
+            return True
+
+        sub_gates = gate.get('sub-gates', [])
+        if not sub_gates:
+            return True
+
+        root_idx = gate['root']
+        start_time = gate['time']
+        p_root = int(self.partition_assignment[start_time][root_idx])
+
+        final_t = start_time
+        for sub_gate in sub_gates[::-1]:
+            if sub_gate['type'] == 'two-qubit':
+                final_t = sub_gate['time']
+                break
+
+        p_root_set = set()
+        for ts in range(start_time, final_t + 1):
+            p_root_set.add(int(self.partition_assignment[ts][root_idx]))
+
+        p_rec_set = set()
+        for sub_gate in sub_gates:
+            if sub_gate['type'] == 'two-qubit':
+                ts = sub_gate['time']
+                _, q1 = sub_gate['qargs']
+                p_rec_set.add(int(self.partition_assignment[ts][q1]))
+
+        target_partitions = (p_rec_set | p_root_set) - {p_root}
+        nested = p_root_set != {p_root}
+        needed_root = (1 if nested else 0) + 1
+        if not self.comm_manager.has_capacity(p_root, n=needed_root):
+            return False
+        for p in target_partitions:
+            if not self.comm_manager.has_capacity(p):
+                return False
+        return True
     
 def reorder_registers_by_index(circuit):
     # Separate quantum registers so comm registers are grouped with their corresponding data registers.
